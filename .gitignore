@@ -176,3 +176,14 @@ tags
 
 # wandb
 wandb
+
+# images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+
+# job logs
+jobs

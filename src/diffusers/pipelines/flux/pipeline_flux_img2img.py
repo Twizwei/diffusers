@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from transformers import (
     CLIPImageProcessor,
     CLIPTextModel,
@@ -683,6 +684,7 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
         true_cfg_scale: float = 1.0,
         image: PipelineImageInput = None,
+        feature_map: torch.Tensor = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         strength: float = 0.6,
@@ -723,6 +725,8 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
                 or tensors, the expected shape should be `(B, C, H, W)` or `(C, H, W)`. If it is a numpy array or a
                 list of arrays, the expected shape should be `(B, H, W, C)` or `(H, W, C)` It can also accept image
                 latents as `image`, but if passing latents directly it is not encoded again.
+            feature_map (torch.Tensor`, *optional*):
+                A numpy array representing a feature map to be used as an additional input.
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image. This is set to 1024 by default for the best results.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
@@ -825,7 +829,9 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         self._interrupt = False
 
         # 2. Preprocess image
-        init_image = self.image_processor.preprocess(image, height=height, width=width)
+        # init_image = self.image_processor.preprocess(image, height=height, width=width)
+        import pdb; pdb.set_trace()
+        init_image = self.prepare_image_and_features(image, feature_map, height, width)
         init_image = init_image.to(dtype=torch.float32)
 
         # 3. Define call parameters
@@ -1032,3 +1038,22 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
             return (image,)
 
         return FluxPipelineOutput(images=image)
+
+    def prepare_image_and_features(self, image, feature_map, height, width):
+        # Process RGB image
+        init_image = self.image_processor.preprocess(image, height=height, width=width)
+        
+        if feature_map is not None:
+            # Process feature map - ensure same dimensions as image
+            # feature_map = torch.from_numpy(feature_map).float()
+            feature_map = F.interpolate(
+                feature_map, 
+                size=(height, width), 
+                mode='bilinear'
+            )
+        
+            # Concatenate along channel dimension
+            combined_input = torch.cat([init_image, feature_map], dim=1)  # Shape: BxCx(H)x(W), C=3+6
+        else:
+            combined_input = init_image
+        return combined_input
