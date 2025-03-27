@@ -58,125 +58,94 @@ logger = get_logger(__name__)
 
 
 class CustomFeatureEncoder(nn.Module):
-    """Simple encoder for feature maps"""
+    """Encoder for combined reference and target feature maps"""
     def __init__(self, in_channels=12, hidden_dim=256, out_dim=768):
         super().__init__()
         self.encoder = nn.Sequential(
+            # First process both features together
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((16, 16)),  # Resize to fixed spatial dimensions
+            # Optional: Add attention mechanism here to focus on relevant features
+            nn.AdaptiveAvgPool2d((16, 16)),
             nn.Flatten(),
             nn.Linear(hidden_dim * 16 * 16, out_dim)
         )
     
     def forward(self, x):
+        # x should have 12 channels (6 ref + 6 tgt)
         return self.encoder(x)
 
 
-class DualAdapterDataset(torch.utils.data.Dataset):
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
+import os
+import json
+import numpy as np
+import random
+
+class DualAdapterDataset(Dataset):
     """
-    A dataset that provides both RGB images and feature maps for dual-adapter training.
+    Dataset for real dual-adapter data from disk.
+    Each sample is a pair: (reference image, target image) with feature maps and a default or user-defined caption.
     """
     def __init__(
-        self, 
-        json_file, 
-        tokenizer, 
-        image_processor,
-        size=224,
-        feature_size=64,
-        feature_channels=12,
-        t_drop_rate=0.05, 
-        i_drop_rate=0.05, 
-        ti_drop_rate=0.05, 
-        image_root_path="",
-        feature_root_path=None,  # If None, will use image_root_path
+        self,
+        input_dir,
+        feature_map_path,
+        tokenizer,
+        resolution=224,
+        default_text="A garden view. A table is in the middle.",
     ):
         super().__init__()
-
+        self.input_dir = input_dir
+        self.feature_maps = np.load(feature_map_path)  # shape: (N, 6, h, w)
         self.tokenizer = tokenizer
-        self.image_processor = image_processor
-        self.size = size
-        self.feature_size = feature_size
-        self.feature_channels = feature_channels
-        self.i_drop_rate = i_drop_rate
-        self.t_drop_rate = t_drop_rate
-        self.ti_drop_rate = ti_drop_rate
-        self.image_root_path = image_root_path
-        self.feature_root_path = feature_root_path if feature_root_path else image_root_path
+        self.default_text = default_text
 
-        # Load data from JSON file
-        self.data = json.load(open(json_file))  # [{"image_file": "img.png", "feature_file": "feat.npy", "text": "A dog"}]
+        # Load and sort image filenames
+        self.image_filenames = sorted([
+            f for f in os.listdir(self.input_dir) if f.endswith(('.png', '.jpg', '.jpeg'))
+        ])
+        self.num_samples = len(self.image_filenames)
 
-        # Image transform
-        self.transform = transforms.Compose([
-            transforms.Resize(self.size, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(self.size),
+        # Set up transform to convert PIL images to tensor and normalize
+        self.to_tensor = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
+            transforms.Resize((resolution, resolution)),
+            transforms.Normalize([0.5] * 3, [0.5] * 3),
         ])
 
+        assert self.feature_maps.shape[0] == self.num_samples, \
+            f"Feature map count {self.feature_maps.shape[0]} doesn't match image count {self.num_samples}"
+
+    def __len__(self):
+        return self.num_samples
+
+    def load_image(self, idx):
+        """Load and preprocess image from file."""
+        img_path = os.path.join(self.input_dir, self.image_filenames[idx])
+        image = Image.open(img_path).convert("RGB")
+        return self.to_tensor(image)
+
     def __getitem__(self, idx):
-        item = self.data[idx]
-        text = item["text"]
-        image_file = item["image_file"]
-        
-        # Get feature file - if not present, later we'll generate random features
-        feature_file = item.get("feature_file", None)
+        # Randomly sample a different index for reference
+        ref_idx = random.choice([i for i in range(self.num_samples) if i != idx])
 
-        # Read RGB image
-        raw_image = Image.open(os.path.join(self.image_root_path, image_file))
-        raw_image = exif_transpose(raw_image)
-        if not raw_image.mode == "RGB":
-            raw_image = raw_image.convert("RGB")
-            
-        image = self.transform(raw_image)
-        
-        # Process image for CLIP
-        clip_image = self.image_processor(images=raw_image, return_tensors="pt").pixel_values.squeeze(0)
+        # Load target image and its feature map
+        tgt_image = self.load_image(idx)
+        tgt_feature = torch.from_numpy(self.feature_maps[idx])
 
-        # Read or create feature map
-        if feature_file and os.path.exists(os.path.join(self.feature_root_path, feature_file)):
-            # Load feature map (e.g., plucker ray field)
-            try:
-                feature_map = np.load(os.path.join(self.feature_root_path, feature_file))
-                feature_map = torch.from_numpy(feature_map).float()
-                
-                # Ensure correct shape (C, H, W)
-                if feature_map.ndim == 3:
-                    if feature_map.shape[0] != self.feature_channels:
-                        feature_map = feature_map.permute(2, 0, 1)  # Move channels to first dimension if needed
-                else:
-                    # Fallback to random if shape is wrong
-                    feature_map = torch.randn(self.feature_channels, self.feature_size, self.feature_size)
-                
-                # Resize if needed
-                if feature_map.shape[1] != self.feature_size or feature_map.shape[2] != self.feature_size:
-                    feature_map = F.interpolate(
-                        feature_map.unsqueeze(0), 
-                        size=(self.feature_size, self.feature_size), 
-                        mode='bilinear', 
-                        align_corners=False
-                    ).squeeze(0)
-            except Exception as e:
-                print(f"Error loading feature map {feature_file}: {e}")
-                feature_map = torch.randn(self.feature_channels, self.feature_size, self.feature_size)
-        else:
-            # Create random feature map if file doesn't exist
-            feature_map = torch.randn(self.feature_channels, self.feature_size, self.feature_size)
+        # Load reference image and its feature map
+        ref_image = self.load_image(ref_idx)
+        ref_feature = torch.from_numpy(self.feature_maps[ref_idx])
 
-        # Conditioning dropout
-        drop_image_embed = 0
-        rand_num = random.random()
-        if rand_num < self.i_drop_rate:
-            drop_image_embed = 1
-        elif rand_num < (self.i_drop_rate + self.t_drop_rate):
-            text = ""
-        elif rand_num < (self.i_drop_rate + self.t_drop_rate + self.ti_drop_rate):
-            text = ""
-            drop_image_embed = 1
-        
+        # Text input (can be extended with external sources or augmentation)
+        text = self.default_text
+
         # Tokenize text
         text_input_ids = self.tokenizer(
             text,
@@ -187,15 +156,13 @@ class DualAdapterDataset(torch.utils.data.Dataset):
         ).input_ids
 
         return {
-            "image": image,
+            "image": tgt_image,
             "text_input_ids": text_input_ids,
-            "clip_image": clip_image,
-            "feature_map": feature_map,
-            "drop_image_embed": drop_image_embed,
+            "clip_image": ref_image,
+            "feature_map_ref": ref_feature,
+            "feature_map_tgt": tgt_feature,
+            "drop_image_embed": 0,  # no dropout in real data version
         }
-
-    def __len__(self):
-        return len(self.data)
 
 
 class DummyDualAdapterDataset(torch.utils.data.Dataset):
@@ -208,7 +175,7 @@ class DummyDualAdapterDataset(torch.utils.data.Dataset):
         image_processor,
         size=224,
         feature_size=64,
-        feature_channels=12,
+        feature_channels=6,
         length=1000,
         t_drop_rate=0.05, 
         i_drop_rate=0.05, 
@@ -287,7 +254,8 @@ class DummyDualAdapterDataset(torch.utils.data.Dataset):
         # Generate random tensors
         image = self.generate_random_image()
         clip_image = self.generate_random_clip_image()
-        feature_map = self.generate_random_feature_map()
+        feature_map_ref = self.generate_random_feature_map()
+        feature_map_tgt = self.generate_random_feature_map()
         
         # Generate random text
         text = self.generate_random_text()
@@ -313,10 +281,11 @@ class DummyDualAdapterDataset(torch.utils.data.Dataset):
         ).input_ids
 
         return {
-            "image": image,
+            "image": image,  # target image
             "text_input_ids": text_input_ids,
-            "clip_image": clip_image,
-            "feature_map": feature_map,
+            "clip_image": clip_image,  # reference image
+            "feature_map_ref": feature_map_ref,  # reference feature map
+            "feature_map_tgt": feature_map_tgt,  # target feature map
             "drop_image_embed": drop_image_embed,
         }
 
@@ -326,14 +295,16 @@ def collate_fn(data):
     images = torch.stack([example["image"] for example in data])
     text_input_ids = torch.cat([example["text_input_ids"] for example in data], dim=0)
     clip_images = torch.stack([example["clip_image"] for example in data])
-    feature_maps = torch.stack([example["feature_map"] for example in data])
+    feature_maps_ref = torch.stack([example["feature_map_ref"] for example in data])
+    feature_maps_tgt = torch.stack([example["feature_map_tgt"] for example in data])
     drop_image_embeds = [example["drop_image_embed"] for example in data]
 
     return {
         "images": images,
         "text_input_ids": text_input_ids,
         "clip_images": clip_images,
-        "feature_maps": feature_maps,
+        "feature_maps_ref": feature_maps_ref,
+        "feature_maps_tgt": feature_maps_tgt,
         "drop_image_embeds": drop_image_embeds,
     }
 
@@ -476,12 +447,12 @@ def parse_args():
         default=1000,
         help="Number of dummy data samples to generate (only used with --use_dummy_data).",
     )
-    parser.add_argument(
-        "--data_json_file",
-        type=str,
-        default=None,
-        help="Path to JSON file containing training data (image paths, feature paths, and captions).",
-    )
+    # parser.add_argument(
+    #     "--data_json_file",
+    #     type=str,
+    #     default=None,
+    #     help="Path to JSON file containing training data (image paths, feature paths, and captions).",
+    # )
     parser.add_argument(
         "--image_root_path",
         type=str,
@@ -493,6 +464,12 @@ def parse_args():
         type=str,
         default=None,
         help="Root path for feature maps referenced in the JSON file. If not provided, uses image_root_path.",
+    )
+    parser.add_argument(
+        "--default_text",
+        type=str,
+        default="A peaceful garden with green plants and flowers. A wooden table is placed in the center.",
+        help="Default text to use for training.",
     )
     parser.add_argument(
         "--image_encoder_path",
@@ -717,8 +694,8 @@ def parse_args():
         args.local_rank = env_local_rank
 
     # Validate arguments
-    if not args.use_dummy_data and args.data_json_file is None:
-        raise ValueError("Must either use --use_dummy_data or provide --data_json_file")
+    # if not args.use_dummy_data and args.data_json_file is None:
+    #     raise ValueError("Must either use --use_dummy_data or provide --data_json_file")
     
     # Set defaults
     if args.feature_encoder_lr is None:
@@ -880,29 +857,22 @@ def main():
             image_processor=image_processor,
             size=args.resolution,
             feature_size=args.feature_size,
-            feature_channels=args.feature_channels,
+            feature_channels=args.feature_channels // 2,
             length=args.dummy_data_size,
             t_drop_rate=args.t_drop_rate,
             i_drop_rate=args.i_drop_rate,
             ti_drop_rate=args.ti_drop_rate,
         )
     else:
-        if args.data_json_file is None:
-            raise ValueError("--data_json_file must be provided when not using dummy data")
+        # if args.data_json_file is None:
+        #     raise ValueError("--data_json_file must be provided when not using dummy data")
         
-        logger.info(f"Loading dataset from {args.data_json_file}")
+        # logger.info(f"Loading dataset from {args.data_json_file}")
         train_dataset = DualAdapterDataset(
-            args.data_json_file,
+            input_dir=args.image_root_path,
+            feature_map_path=args.feature_root_path,
             tokenizer=tokenizer_one,
-            image_processor=image_processor,
-            size=args.resolution,
-            feature_size=args.feature_size,
-            feature_channels=args.feature_channels,
-            t_drop_rate=args.t_drop_rate,
-            i_drop_rate=args.i_drop_rate,
-            ti_drop_rate=args.ti_drop_rate,
-            image_root_path=args.image_root_path,
-            feature_root_path=args.feature_root_path,
+            default_text=args.default_text,
         )
     
     train_dataloader = torch.utils.data.DataLoader(
@@ -984,7 +954,7 @@ def main():
                     latents = latents_cache[step]
                 else:
                     with torch.no_grad():
-                        batch["images"] = batch["images"].to(accelerator.device, dtype=weight_dtype)
+                        batch["images"] = batch["images"].to(accelerator.device, dtype=weight_dtype)  # target images
                         latents = vae.encode(batch["images"]).latent_dist.sample()
                         latents = latents * vae.config.scaling_factor
                 
@@ -1046,7 +1016,8 @@ def main():
                 image_embeds = torch.stack(image_embeds_)
                 
                 # Process feature maps
-                feature_maps = batch["feature_maps"].to(accelerator.device, dtype=weight_dtype)
+                feature_maps = torch.cat([batch["feature_maps_ref"], batch["feature_maps_tgt"]], dim=1).to(accelerator.device, dtype=weight_dtype)
+                # feature_maps = batch["feature_map"].to(accelerator.device, dtype=weight_dtype)
                 
                 # Apply same dropout to feature maps
                 if any(drop_img for drop_img in batch["drop_image_embeds"]):
