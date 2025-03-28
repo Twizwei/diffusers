@@ -850,7 +850,7 @@ def main():
     )
     
     # Create dataset and dataloader
-    if args.use_dummy_data:
+    if args.use_dummy_data: 
         logger.info(f"Using randomly generated dummy data with {args.dummy_data_size} samples")
         train_dataset = DummyDualAdapterDataset(
             tokenizer=tokenizer_one,

@@ -248,7 +248,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--pretrained_vae_model_name_or_path",
         type=str,
-        default=None,
+        default="madebyollin/sdxl-vae-fp16-fix",
         help="Path to an improved VAE to stabilize training. For more details check out: https://github.com/huggingface/diffusers/pull/4038.",
     )
     parser.add_argument(

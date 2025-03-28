@@ -37,14 +37,21 @@
 #   --seed="0" \
 #   --push_to_hub
 
-python train_flux_dual_adapter.py   --pretrained_model_name_or_path="black-forest-labs/FLUX.1-dev" \
-  --output_dir="/vulcanscratch/yiranx/sc4d/flux_ckpts/flux-ip-adapter-garden-16" \
-  --train_batch_size=2 \
-  --num_train_epochs=500 \
-  --mixed_precision="bf16" \
-  --save_steps=100 \
-  --rgb_adapter_scale=0.7 \
-  --feature_adapter_scale=0.3 \
-  --resolution=224 \
-  --image_root_path /fs/vulcan-projects/sc4d/datasets/garden_16/input/ \
-  --feature_root_path /fs/vulcan-projects/sc4d/datasets/garden_16/plucker.npy
+# python train_flux_dual_adapter.py   --pretrained_model_name_or_path="black-forest-labs/FLUX.1-dev" \
+#   --output_dir="/vulcanscratch/yiranx/sc4d/flux_ckpts/flux-ip-adapter-garden-16" \
+#   --train_batch_size=2 \
+#   --num_train_epochs=500 \
+#   --mixed_precision="bf16" \
+#   --save_steps=100 \
+#   --rgb_adapter_scale=0.7 \
+#   --feature_adapter_scale=0.3 \
+#   --resolution=224 \
+#   --image_root_path /fs/vulcan-projects/sc4d/datasets/garden_16/input/ \
+#   --feature_root_path /fs/vulcan-projects/sc4d/datasets/garden_16/plucker.npy
+
+export MODEL_DIR="stabilityai/stable-diffusion-xl-base-1.0"
+OUTPUT_DIR="/vulcanscratch/yiranx/sc4d/flux_ckpts/sdxl-t2i-adapter-fill50k"
+accelerate launch examples/t2i_adapter/train_t2i_adapter_sdxl.py  --pretrained_model_name_or_path=$MODEL_DIR --pretrained_vae_model_name_or_path madebyollin/sdxl-vae-fp16-fix  --output_dir=$OUTPUT_DIR  --dataset_name=fusing/fill50k  --mixed_precision="fp16"  --resolution=1024  --learning_rate=1e-5  --max_train_steps=15000  --validation_image "./conditioning_image_1.png" "./conditioning_image_2.png"  --validation_prompt "red circle with blue background" "cyan circle with brown floral background"  --validation_steps=100  --train_batch_size=1  --gradient_accumulation_steps=4  --report_to="wandb"  --seed=42  --push_to_hub
+
+# OUTPUT_DIR="/vulcanscratch/yiranx/sc4d/flux_ckpts/garden_16_sdxl_t2i_adapter"
+# accelerate launch examples/t2i_adapter/train_t2i_adapter_sdxl.py  --pretrained_model_name_or_path=$MODEL_DIR  --output_dir=$OUTPUT_DIR  --train_data_dir=/vulcanscratch/yiranx/sc4d/datasets/garden_16  --mixed_precision="fp16"  --resolution=1024  --learning_rate=1e-5  --max_train_steps=15000  --validation_image "/vulcanscratch/yiranx/sc4d/datasets/garden_16/conditioning_images/000.png" --validation_prompt "A garden view. A table is in the middle. There is a vase on the table."  --validation_steps=100  --train_batch_size=1  --gradient_accumulation_steps=4  --report_to="wandb"  --seed=42  --push_to_hub  --pretrained_vae_model_name_or_path madebyollin/sdxl-vae-fp16-fix
