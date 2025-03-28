@@ -91,6 +91,8 @@ def log_validation(vae, unet, adapter, args, accelerator, weight_dtype, step):
         torch_dtype=weight_dtype,
     )
     pipeline = pipeline.to(accelerator.device)
+    # if args.pretrained_lora_name_or_path is not None:
+    #     pipeline.load_lora_weights(args.pretrained_lora_name_or_path)
     pipeline.set_progress_bar_config(disable=True)
 
     if args.enable_xformers_memory_efficient_attention:
@@ -262,6 +264,12 @@ def parse_args(input_args=None):
         default=None,
         required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--pretrained_lora_name_or_path",
+        type=str,
+        default=None,
+        help="Path to pretrained lora model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
         "--pretrained_vae_model_name_or_path",
@@ -940,9 +948,66 @@ def main(args):
         revision=args.revision,
         variant=args.variant,
     )
+    # if args.pretrained_lora_name_or_path is not None:
+    #     from diffusers import AutoPipelineForText2Image
+    #     pipeline = AutoPipelineForText2Image.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0")
+    #     pipeline.load_lora_weights(args.pretrained_lora_name_or_path)
+    #     unet = pipeline.unet
+    #     del pipeline
+    # else:
+    #     unet = UNet2DConditionModel.from_pretrained(
+    #         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
+    #     )
+    
+
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
-    )
+            args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
+        )
+
+    if args.pretrained_lora_name_or_path is not None:
+        from safetensors.torch import load_file
+        lora_state_dict = load_file(os.path.join(args.pretrained_lora_name_or_path, "pytorch_lora_weights.safetensors"))
+        rank = 4
+        lora_alpha = 4
+        for key in lora_state_dict:
+            if "lora.down" in key:
+                # Derive the corresponding lora_up key.
+                lora_up_key = key.replace("lora.down", "lora.up")
+                if lora_up_key not in lora_state_dict:
+                    print(f"Missing corresponding lora_up for {key}")
+                    continue
+
+                # Get the low-rank matrices
+                lora_down = lora_state_dict[key]  # shape: [r, d] or similar
+                lora_up = lora_state_dict[lora_up_key]  # shape: [d, r] or similar
+                
+                # Determine the base weight key by stripping the LoRA suffix.
+                # For example, if key is "module.layer.to_q.lora_down.weight",
+                # the base key might be "module.layer.to_q.weight"
+                base_key = key.replace("unet.", "").replace(".lora.down", "")
+                
+                if base_key not in unet.state_dict():
+                    print(f"Base key {base_key} not found in the UNet state_dict.")
+                    continue
+
+                # Get the original weight
+                W = unet.state_dict()[base_key]
+                
+                # Compute the low-rank update.
+                # Note: The matrix multiplication order assumes that lora_up and lora_down
+                # are stored such that (lora_up @ lora_down) has the same shape as W.
+                update = (lora_alpha / rank) * (lora_up @ lora_down)
+                
+                # Ensure the update tensor is on the same device and dtype as the base weight
+                update = update.to(W.device).to(W.dtype)
+                
+                # Update the weight manually
+                W_new = W + update
+                
+                # Copy the updated weight back to the model
+                unet.state_dict()[base_key].copy_(W_new)
+
+                logger.info(f"Updated {base_key} with LoRA weights.")
 
     if args.adapter_model_name_or_path:
         logger.info("Loading existing adapter weights.")
